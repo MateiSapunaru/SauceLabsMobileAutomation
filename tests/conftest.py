@@ -36,6 +36,7 @@ def driver(appium_server):
     # too tight there and cause spurious session-setup timeouts.
     options.adb_exec_timeout = 60000
     options.uiautomator2_server_install_timeout = 60000
+    options.android_install_timeout = 300000
 
     driver = webdriver.Remote(APPIUM_URL, options=options)
     yield driver

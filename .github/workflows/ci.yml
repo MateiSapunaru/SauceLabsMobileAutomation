@@ -46,7 +46,11 @@ jobs:
       - name: Run tests on Android emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 34
+          # API 30, not 34 like the local dev AVD: headless Android 13/14
+          # emulators hit an unresolved Appium "Settings app is not running"
+          # bug (appium/appium#20074) that the local, non-headless AVD never
+          # sees. Our 2020-era app doesn't need anything from API 34.
+          api-level: 30
           target: google_apis
           arch: x86_64
           profile: pixel_6
