@@ -31,6 +31,11 @@ def driver(appium_server):
     # after ~1-2s; without this, Appium's exact-activity-match wait fails because
     # by the time it polls, the app has already moved past SplashActivity.
     options.app_wait_activity = "com.swaglabsmobileapp.*"
+    # CI runners are slower than a local dev machine; Appium's 20s defaults
+    # for adb operations and installing its own uiautomator2-server APK are
+    # too tight there and cause spurious session-setup timeouts.
+    options.adb_exec_timeout = 60000
+    options.uiautomator2_server_install_timeout = 60000
 
     driver = webdriver.Remote(APPIUM_URL, options=options)
     yield driver
