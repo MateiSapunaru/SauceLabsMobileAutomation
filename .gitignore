@@ -12,7 +12,7 @@ apps/*.zip
 # Appium / test artifacts
 *.log
 allure-results/
-screenshots/
+/screenshots/
 
 # IDE
 .idea/
