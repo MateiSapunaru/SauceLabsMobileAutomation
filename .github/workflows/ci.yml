@@ -37,6 +37,12 @@ jobs:
           npm install -g appium
           appium driver install uiautomator2
 
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
       - name: Download the sample app APK
         run: |
           mkdir -p apps
@@ -53,11 +59,7 @@ jobs:
           api-level: 30
           target: google_apis
           arch: x86_64
-          # A lighter profile than pixel_6: shared GitHub-hosted runners
-          # (2 cores / 7GB) are tight for a fully software-rendered
-          # emulator, and the 3rd CI attempt crashed system_server
-          # (DeadSystemException) under that load a few minutes into boot.
-          profile: pixel
+          profile: pixel_6
           disable-animations: true
           emulator-options: >-
             -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
