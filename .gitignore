@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# App binaries (downloaded from vendor releases, not source we own)
+apps/*.apk
+apps/*.ipa
+apps/*.zip
+
+# Appium / test artifacts
+*.log
+allure-results/
+screenshots/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
