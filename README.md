@@ -50,6 +50,8 @@ Open Android Studio, go to **Tools > Device Manager**, and create a virtual devi
 
 Boot the emulator once from Device Manager and confirm it reaches the home screen before continuing.
 
+Note that the CI pipeline runs against API 30 instead of API 34. This is intentional, not a mismatch: see BUG-005 in the Bugs section below for the reason.
+
 ### 2. Node.js and Appium
 
 The Appium server itself runs on Node.js, independent of the Python client.
@@ -100,19 +102,107 @@ pytest tests/ -v
 
 All credentials, error message text, and product names used in assertions were taken directly from the running application (via `uiautomator dump` and Appium's own `page_source`), not assumed or guessed from documentation.
 
-## Issues found and fixed while building this suite
+## Bugs found during test development
 
-**Splash screen activity mismatch.** The application's manifest declared launcher activity is `SplashActivity`, which redirects to `MainActivity` roughly one to two seconds after launch. Appium's default session startup waits for the exact launcher activity to remain the resumed activity, and failed because by the time it checked, the application had already moved on. Fixed by setting `appWaitActivity` to a wildcard (`com.swaglabsmobileapp.*`) covering both activities.
+Logged in the same format used to file a defect against an application or environment, since that is the actual output of this kind of work, not just the passing test at the end.
 
-**Assertions against elements that had not rendered yet.** Even with the activity wait fixed, a session could start while the application was still on the splash screen. A bare `find_element` call immediately after session start would hit that half rendered state. Fixed with an explicit `WebDriverWait` based wait in `BasePage`, used throughout the page objects instead of unconditional `find_element` calls.
+### BUG-001: Session creation fails with "SplashActivity never started"
 
-**Text living in unlabeled child elements.** Both the login error message and the cart item count badge are structured the same way: the element carrying the accessibility identifier (`test-Error message`, `test-Cart`) has no text of its own, and the actual text is in an unlabeled child `TextView`. Calling `.text` on the labeled element silently returns an empty string rather than raising an error, which would make a naive assertion fail in a confusing way. Fixed with an XPath descendant selector into the child element in both cases.
+**Component:** Appium session setup
+**Environment:** Local Android 14 emulator (Pixel 6, API 34), Appium 3.7.0, appium-uiautomator2-driver 8.6.2
 
-**adb and Appium timeouts under CI load.** The first GitHub Actions run failed every test at session setup. Installing Appium's own `uiautomator2-server` companion APK hit the default 20 second `adbExecTimeout`, because the shared CI runner is measurably slower than local development hardware. Raised to 60 seconds, along with `androidInstallTimeout` after a plain `adb install` of the application itself also exceeded its 90 second default on the runner once.
+**Steps to reproduce:**
+1. Start a new Appium session against the application using the default `app` capability, with no `appWaitActivity` override set.
 
-**Headless emulator instability on Android 13 and 14.** After fixing the timeouts above, CI hit a separate, unresolved upstream issue ([appium/appium#20074](https://github.com/appium/appium/issues/20074)): a headless Android 13 or 14 emulator fails an internal Appium readiness check for a companion "Settings" application, with no confirmed fix at the time of writing. The local development AVD never encountered this because it is not headless. CI now targets API 30 instead of API 34, which the application, itself built years before API 34 existed, has no issue running on.
+**Expected result:** The session starts once the application has launched.
 
-**Missing KVM permissions on the CI runner.** After the API level change, a subsequent run still failed, this time with the emulator's own system server crashing partway through boot. The actual cause was unrelated to API level or device profile: `reactivecircus/android-emulator-runner` requires an explicit step granting the CI runner access to `/dev/kvm` on Linux, documented in the action's own README but easy to overlook. Without it, the emulator silently falls back to fully software emulated CPU virtualization instead of hardware acceleration, which explained both the six-plus minute boot times observed in CI (roughly one minute locally) and the crashes under sustained load. Adding the KVM permission step resolved both issues at once, and the workflow run time dropped from over twenty minutes to under four.
+**Actual result:** Session creation fails with `Cannot start the 'com.swaglabsmobileapp' application ... 'com.swaglabsmobileapp.SplashActivity' never started`, even though the application launches normally when started manually through `adb shell am start`.
+
+**Root cause:** The application's manifest declared launcher activity is `SplashActivity`, which redirects to `MainActivity` one to two seconds after launch. Appium's default session startup waits for the exact launcher activity to remain the resumed activity. By the time it polled, the application had already moved past `SplashActivity`.
+
+**Resolution:** Set the `appWaitActivity` capability to a wildcard, `com.swaglabsmobileapp.*`, covering both activities. See `tests/conftest.py`.
+
+### BUG-002: Element lookups fail intermittently right after session start
+
+**Component:** Test implementation
+**Environment:** Same as BUG-001, with that fix in place.
+
+**Steps to reproduce:**
+1. Start a session with the `appWaitActivity` fix from BUG-001 applied.
+2. Immediately call `find_element` for an element on the login screen.
+
+**Expected result:** The element is found once the login screen has rendered.
+
+**Actual result:** `NoSuchElementException`. Appium considers the session ready as soon as the application process is on screen, which can be before the login screen itself has finished rendering.
+
+**Root cause:** No explicit wait was used before interacting with the UI. `find_element` does not wait for an element to appear; it fails immediately if the element is not present at the moment of the call.
+
+**Resolution:** Added a `wait_for_visible` helper to `BasePage`, built on `WebDriverWait` and `expected_conditions.visibility_of_element_located`, and used it in place of bare `find_element` calls throughout the page objects.
+
+### BUG-003: Assertions against error and cart badge text return an empty string
+
+**Component:** Application accessibility structure, test implementation
+**Environment:** Same as BUG-001.
+
+**Steps to reproduce:**
+1. Trigger the login error state, for example by logging in as `locked_out_user`.
+2. Locate the element with accessibility id `test-Error message` and read its `.text` property.
+
+**Expected result:** The element's text matches the error message displayed on screen.
+
+**Actual result:** `.text` returns an empty string. No exception is raised, so a direct assertion such as `error_message() == "Sorry, this user has been locked out."` fails with no indication of why. The same problem affects the cart item count badge on the element with accessibility id `test-Cart`.
+
+**Root cause:** In both cases, the element carrying the accessibility identifier is a container view with no text content of its own. The actual text is rendered by an unlabeled child `TextView`.
+
+**Resolution:** Used an XPath descendant selector to target the child `TextView` directly, for example `//*[@content-desc="test-Error message"]//android.widget.TextView`, instead of reading `.text` off the labeled container.
+
+### BUG-004: All CI test runs fail at session setup with an adb timeout
+
+**Component:** CI pipeline
+**Environment:** GitHub Actions, `ubuntu-latest`, Android 14 emulator (API 34 at the time)
+
+**Steps to reproduce:**
+1. Push a commit that triggers the CI workflow.
+
+**Expected result:** The test suite runs against the CI emulator the same way it runs locally.
+
+**Actual result:** Every test fails during driver setup with `Error executing adbExec ... Command '...adb install ... appium-uiautomator2-server-v10.6.6.apk' timed out after 20000ms`.
+
+**Root cause:** Appium installs its own uiautomator2-server companion APK on every new session. The default 20 second `adbExecTimeout` is not enough on the CI runner, which is measurably slower than local development hardware.
+
+**Resolution:** Raised `adbExecTimeout` and `uiautomator2ServerInstallTimeout` to 60000ms each in `tests/conftest.py`. A subsequent run also hit the 90 second default `androidInstallTimeout` while installing the application itself, so that was raised to 300000ms as well.
+
+### BUG-005: CI emulator fails a Settings app readiness check on Android 13/14
+
+**Component:** CI pipeline
+**Environment:** GitHub Actions, `ubuntu-latest`, headless Android 14 emulator (API 34), with BUG-004 fixed.
+
+**Steps to reproduce:**
+1. Push a commit with the increased timeouts from BUG-004 in place.
+
+**Expected result:** The session starts successfully once the timeouts are no longer the limiting factor.
+
+**Actual result:** Session creation fails with `Appium Settings app is not running after 30000ms`.
+
+**Root cause:** Matches a known, unresolved upstream issue, [appium/appium#20074](https://github.com/appium/appium/issues/20074): headless Android 13 and 14 emulators fail an internal Appium readiness check for the `io.appium.settings` companion application. The local development AVD never hits this because it runs with an actual display, not headless.
+
+**Resolution:** Targeted API 30 in the CI workflow instead of API 34. The application predates API 34 by several years and has no dependency on anything specific to it, and API 30 is not affected by the upstream issue.
+
+### BUG-006: CI emulator system server crashes during boot
+
+**Component:** CI pipeline
+**Environment:** GitHub Actions, `ubuntu-latest`, API 30 emulator, with BUG-005 fixed.
+
+**Steps to reproduce:**
+1. Push a commit with the API level change from BUG-005 in place.
+
+**Expected result:** The emulator boots in roughly the same time as it does locally, under two minutes, and stays stable through the action's post-boot setup.
+
+**Actual result:** Boot took over six minutes, and shortly after "boot completed" was logged, the emulator's system server crashed with `android.os.DeadSystemException` while the action was still configuring the device, aborting the run.
+
+**Root cause:** `reactivecircus/android-emulator-runner` requires a separate step granting the CI runner access to `/dev/kvm` on Linux. This is documented in the action's own README but was missed when the workflow was first written. Without it, QEMU silently falls back to fully software emulated CPU virtualization instead of hardware acceleration, which explains both the abnormally long boot time and the crash under the resulting sustained CPU load.
+
+**Resolution:** Added the KVM group permissions step to `.github/workflows/ci.yml`. Workflow run time dropped from over twenty minutes to under four once this was in place.
 
 ## Continuous integration
 
